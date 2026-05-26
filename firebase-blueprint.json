@@ -1,0 +1,98 @@
+{
+  "entities": {
+    "PurchaseOrder": {
+      "title": "Purchase Order",
+      "description": "Represents an individual PO registered in the system.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "category": { "type": "string" },
+        "prRequestor": { "type": "string" },
+        "processorName": { "type": "string" },
+        "prReceivedDate": { "type": "string" },
+        "date": { "type": "string" },
+        "expectedDelivery": { "type": "string" },
+        "receivedDate": { "type": "string" },
+        "vendor": { "type": "string" },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "grossAmount": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "paymentTerms": { "type": "string" },
+        "remarks": { "type": "string" },
+        "attachmentData": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "vendor", "amount"]
+    },
+    "ApvRecord": {
+      "title": "APV Record",
+      "description": "Represents an individual Accounts Payable Voucher (APV) linked to a PO.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "poId": { "type": "string" },
+        "businessUnit": { "type": "string" },
+        "category": { "type": "string" },
+        "vendor": { "type": "string" },
+        "invoiceDate": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "amount": { "type": "number" },
+        "funded": { "type": "boolean" },
+        "fundedDate": { "type": "string" },
+        "settledDate": { "type": "string" },
+        "paymentTerms": { "type": "string" },
+        "status": { "type": "string" },
+        "checkNumber": { "type": "string" },
+        "checkDate": { "type": "string" },
+        "releaseDate": { "type": "string" },
+        "checkStatus": { "type": "string" }
+      },
+      "required": ["id", "poId", "vendor", "amount"]
+    },
+    "AppUser": {
+      "title": "App User permissions",
+      "description": "Authorized email configuration outlining permissions.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "department": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["email"]
+    },
+    "AuditLog": {
+      "title": "Audit Log",
+      "description": "System modifications logged sequentially.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "user": { "type": "string" },
+        "action": { "type": "string" },
+        "entityType": { "type": "string" },
+        "entityId": { "type": "string" },
+        "details": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/artifacts/{appId}/public/data/purchases/{poId}": {
+      "schema": "PurchaseOrder",
+      "description": "Subcollection storing all Purchase Orders for an applet instance."
+    },
+    "/artifacts/{appId}/public/data/apvs/{apvId}": {
+      "schema": "ApvRecord",
+      "description": "Subcollection storing all Accounts Payable Vouchers for an applet instance."
+    },
+    "/artifacts/{appId}/public/data/appUsers/{email}": {
+      "schema": "AppUser",
+      "description": "Subcollection mapping permissions to user email identifiers."
+    },
+    "/artifacts/{appId}/public/data/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Chronological audit trails of actions taken in the dashboard."
+    }
+  }
+}

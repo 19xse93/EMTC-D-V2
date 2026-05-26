@@ -1,0 +1,8 @@
+{
+  "name": "Remix: APV Aging Dashboard",
+  "description": "Financial, Purchase Orders and APV Aging tracking dashboard for ETMC elev8.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
