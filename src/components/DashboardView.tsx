@@ -1,10 +1,24 @@
 import { useMemo } from 'react';
 import { 
   LayoutDashboard, ShoppingCart, DollarSign, AlertCircle, 
-  CheckCircle, Activity, Truck, Building, PiggyBank, FileSignature 
+  CheckCircle, Activity, Truck, Building, PiggyBank, FileSignature,
+  TrendingUp, BarChart3
 } from 'lucide-react';
 import { PurchaseOrder, ApvRecord } from '../types';
 import { formatCurrency } from '../utils';
+import {
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Legend
+} from 'recharts';
 
 interface DashboardViewProps {
   purchases: PurchaseOrder[];
@@ -46,6 +60,53 @@ export default function DashboardView({
   avgOverallVariance,
   supplierDeliveryList
 }: DashboardViewProps) {
+  const last6Months = useMemo(() => {
+    const list = [];
+    const d = new Date();
+    for (let i = 5; i >= 0; i--) {
+      const targetDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
+      const year = targetDate.getFullYear();
+      const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+      const label = targetDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      const key = `${year}-${month}`;
+      list.push({ key, label });
+    }
+    return list;
+  }, []);
+
+  const chartData = useMemo(() => {
+    return last6Months.map(({ key, label }) => {
+      const unpaidApvsInMonth = apvs.filter(apv => {
+        if (apv.status !== 'Unpaid') return false;
+        if (!apv.invoiceDate) return false;
+        return apv.invoiceDate.startsWith(key);
+      });
+      const totalAmount = unpaidApvsInMonth.reduce((sum, apv) => sum + Number(apv.amount || 0), 0);
+      return {
+        month: label,
+        "Outstanding APV": totalAmount,
+      };
+    });
+  }, [apvs, last6Months]);
+
+  const topSuppliersData = useMemo(() => {
+    const map: { [vendor: string]: number } = {};
+    apvs.forEach(apv => {
+      if (apv.status === 'Unpaid') {
+        const amt = Number(apv.amount || 0);
+        const v = apv.vendor || 'Unknown Vendor';
+        map[v] = (map[v] || 0) + amt;
+      }
+    });
+    return Object.entries(map)
+      .map(([name, balance]) => ({
+        name,
+        "Outstanding Balance": balance
+      }))
+      .sort((a, b) => b["Outstanding Balance"] - a["Outstanding Balance"])
+      .slice(0, 5);
+  }, [apvs]);
+
   return (
     <div className="grid grid-cols-1 gap-4 md:gap-6 items-start">
       {dbError && (
@@ -110,6 +171,109 @@ export default function DashboardView({
             <div className="min-w-0 flex-1 w-full">
               <p className="text-[10px] md:text-xs text-gray-500 font-medium truncate">Paid / Released</p>
               <h3 className="text-sm md:text-xl font-bold text-gray-900 truncate" title={formatCurrency(totalPaidChecks)}>{formatCurrency(totalPaidChecks)}</h3>
+            </div>
+          </div>
+        </div>
+
+        {/* Charts Section: Outstanding APV Trend & Top 5 Suppliers Outstanding */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
+          {/* Outstanding APV Trend Line Chart */}
+          <div id="apv-outstanding-trend" className="bg-white p-4 md:p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col h-[350px]">
+            <h3 className="text-base md:text-lg font-semibold text-gray-900 mb-4 flex items-center">
+              <TrendingUp className="mr-2 text-rose-500" size={18} /> Outstanding APV Trend (Last 6 Months)
+            </h3>
+            <div className="flex-1 w-full min-h-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                  <XAxis 
+                    dataKey="month" 
+                    tick={{ fill: '#6b7280', fontSize: 11 }}
+                    axisLine={{ stroke: '#e5e7eb' }}
+                    tickLine={{ stroke: '#e5e7eb' }}
+                  />
+                  <YAxis 
+                    tick={{ fill: '#6b7280', fontSize: 11 }}
+                    axisLine={{ stroke: '#e5e7eb' }}
+                    tickLine={{ stroke: '#e5e7eb' }}
+                    tickFormatter={(val) => {
+                      if (val >= 1000000) return `₱${(val / 1000000).toFixed(1)}M`;
+                      if (val >= 1000) return `₱${(val / 1000).toFixed(0)}k`;
+                      return `₱${val}`;
+                    }}
+                  />
+                  <Tooltip 
+                    formatter={(value: any) => [formatCurrency(Number(value)), 'Outstanding APV']}
+                    contentStyle={{ 
+                      backgroundColor: '#ffffff', 
+                      border: '1px solid #e5e7eb', 
+                      borderRadius: '8px', 
+                      fontSize: '12px',
+                      boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)'
+                    }}
+                  />
+                  <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                  <Line 
+                    type="monotone" 
+                    dataKey="Outstanding APV" 
+                    stroke="#ef4444" 
+                    strokeWidth={3} 
+                    activeDot={{ r: 8 }} 
+                    dot={{ r: 4, strokeWidth: 2 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Top 5 Suppliers by Outstanding Balance Bar Chart */}
+          <div id="top-suppliers-outstanding" className="bg-white p-4 md:p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col h-[350px]">
+            <h3 className="text-base md:text-lg font-semibold text-gray-900 mb-4 flex items-center">
+              <BarChart3 className="mr-2 text-indigo-500" size={18} /> Top 5 Suppliers by Outstanding Balance
+            </h3>
+            <div className="flex-1 w-full min-h-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={topSuppliersData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                  <XAxis 
+                    dataKey="name" 
+                    tick={{ fill: '#6b7280', fontSize: 10 }}
+                    axisLine={{ stroke: '#e5e7eb' }}
+                    tickLine={{ stroke: '#e5e7eb' }}
+                  />
+                  <YAxis 
+                    tick={{ fill: '#6b7280', fontSize: 11 }}
+                    axisLine={{ stroke: '#e5e7eb' }}
+                    tickLine={{ stroke: '#e5e7eb' }}
+                    tickFormatter={(val) => {
+                      if (val >= 1000000) return `₱${(val / 1000000).toFixed(1)}M`;
+                      if (val >= 1000) return `₱${(val / 1000).toFixed(0)}k`;
+                      return `₱${val}`;
+                    }}
+                  />
+                  <Tooltip 
+                    formatter={(value: any) => [formatCurrency(Number(value)), 'Outstanding Balance']}
+                    contentStyle={{ 
+                      backgroundColor: '#ffffff', 
+                      border: '1px solid #e5e7eb', 
+                      borderRadius: '8px', 
+                      fontSize: '12px',
+                      boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)'
+                    }}
+                  />
+                  <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                  <Bar 
+                    dataKey="Outstanding Balance" 
+                    fill="#6366f1" 
+                    radius={[4, 4, 0, 0]}
+                  >
+                    {topSuppliersData.map((_entry, index) => {
+                      const colors = ['#6366f1', '#4f46e5', '#4338ca', '#3730a3', '#312e81'];
+                      return <Cell key={`cell-${index}`} fill={colors[index % colors.length]} />;
+                    })}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
             </div>
           </div>
         </div>

@@ -816,8 +816,8 @@ export default function App() {
   };
 
   const handleExportCompleteReport = () => {
-    if (!purchases.length && !apvs.length) { 
-      alert("No data available to export."); 
+    if (!baseFilteredPurchases.length && !baseFilteredApvs.length) { 
+      alert("No matching filtered data available to export with current filters."); 
       return; 
     }
 
@@ -842,8 +842,8 @@ export default function App() {
 
     const exportedApvIds = new Set<string>();
 
-    purchases.forEach(po => {
-      const linkedApvs = apvs.filter(a => a.poId === po.id);
+    baseFilteredPurchases.forEach(po => {
+      const linkedApvs = baseFilteredApvs.filter(a => a.poId === po.id);
       
       if (linkedApvs.length > 0) {
         linkedApvs.forEach(apv => {
@@ -870,7 +870,7 @@ export default function App() {
       }
     });
 
-    apvs.forEach(apv => {
+    baseFilteredApvs.forEach(apv => {
       if (!exportedApvIds.has(apv.id)) {
         const aging = getAgingCategory(apv.dueDate, apv.status, TODAY);
         const row = [
@@ -888,13 +888,25 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `ETMC_Complete_Report_${new Date().toISOString().split('T')[0]}.csv`);
+
+    let filename = "ETMC_Report";
+    if (selectedMonth !== 'All') {
+      filename += `_${selectedMonth}`;
+    } else {
+      filename += "_All-Months";
+    }
+    if (selectedCategory !== 'All') {
+      filename += `_${selectedCategory}`;
+    }
+    filename += `_${new Date().toISOString().split('T')[0]}.csv`;
+
+    link.setAttribute("download", filename);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
     
-    logAction('EXPORT', 'SYSTEM', 'REPORT', 'Exported complete data report to CSV.');
+    logAction('EXPORT', 'SYSTEM', 'REPORT', `Exported filtered data report to CSV (Month: ${selectedMonth}, Category: ${selectedCategory}, Query: "${globalSearchQuery}").`);
   };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
