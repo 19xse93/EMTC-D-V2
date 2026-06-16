@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import firebase, { db, auth, appId } from './firebase';
 import { 
-  UserPermissions, PurchaseOrder, ApvRecord, AppUser, AuditLog 
+  UserPermissions, PurchaseOrder, ApvRecord, AppUser, AuditLog, OrderItem 
 } from './types';
 import { 
   formatCurrency, standardizeDate, safeParseDate, formatMonthLabel, 
@@ -85,8 +85,32 @@ export default function App() {
 
   const [selectedPo, setSelectedPo] = useState<PurchaseOrder | null>(null);
   const [editingPoId, setEditingPoId] = useState<string | null>(null);
-  const [newPo, setNewPo] = useState<PurchaseOrder>({ id: '', category: 'Freshman', prRequestor: '', processorName: '', prReceivedDate: '', date: '', expectedDelivery: '', receivedDate: '', vendor: '', description: '', amount: 0, grossAmount: 0, discountAmount: 0, paymentTerms: 'Terms', remarks: '', attachmentData: '', status: 'Pending' });
-  const [newApv, setNewApv] = useState<ApvRecord>({ id: '', poId: '', businessUnit: 'ETMC', category: 'Freshman', vendor: '', invoiceDate: '', dueDate: '', amount: 0, funded: false, fundedDate: '', settledDate: '', paymentTerms: 'Terms', status: 'Unpaid', checkNumber: '', checkDate: '', releaseDate: '', checkStatus: 'Pending Check' });
+  const [newPo, setNewPo] = useState<PurchaseOrder>({ id: '', category: 'Freshman', prRequestor: '', processorName: '', prReceivedDate: '', date: '', expectedDelivery: '', receivedDate: '', vendor: '', description: '', amount: 0, grossAmount: 0, discountAmount: 0, paymentTerms: 'Terms', remarks: '', attachmentData: '', status: 'Pending', items: [] });
+  
+  // Custom draft states for PO Item List
+  const [poItemDesc, setPoItemDesc] = useState('');
+  const [poItemQty, setPoItemQty] = useState<number | ''>('');
+  const [poItemPrice, setPoItemPrice] = useState<number | ''>('');
+  const [poItemType, setPoItemType] = useState<'Goods' | 'Services'>('Goods');
+  const [poItemTaxRate, setPoItemTaxRate] = useState<number>(12); // defaults to 12%
+  const [editingLineItemId, setEditingLineItemId] = useState<string | null>(null);
+  const [isPoRoundOff, setIsPoRoundOff] = useState<boolean>(true);
+
+  const calculatePoNetAmount = (gross: number, tax: number, discount: number, roundOff: boolean): number => {
+    const rawNet = Math.max(0, gross + tax - discount);
+    return roundOff ? Math.round(rawNet) : Number(rawNet.toFixed(2));
+  };
+
+  useEffect(() => {
+    const gross = newPo.grossAmount || 0;
+    const tax = newPo.taxAmount || 0;
+    const discount = newPo.discountAmount || 0;
+    const computedAmt = calculatePoNetAmount(gross, tax, discount, isPoRoundOff);
+    if (computedAmt !== newPo.amount) {
+      setNewPo(prev => ({ ...prev, amount: computedAmt }));
+    }
+  }, [isPoRoundOff, newPo.grossAmount, newPo.taxAmount, newPo.discountAmount]);
+  const [newApv, setNewApv] = useState<ApvRecord>({ id: '', poId: '', category: 'Freshman', vendor: '', invoiceDate: '', dueDate: '', amount: 0, funded: false, fundedDate: '', settledDate: '', paymentTerms: 'Terms', status: 'Unpaid', checkNumber: '', checkDate: '', releaseDate: '', checkStatus: 'Pending Check' });
   const [editingApvId, setEditingApvId] = useState<string | null>(null);
   const [receiveDate, setReceiveDate] = useState('');
   const [itemToDelete, setItemToDelete] = useState<{ type: 'PO' | 'APV' | null; id: string | null }>({ type: null, id: null });
@@ -94,7 +118,7 @@ export default function App() {
   const [poStatusFilter, setPoStatusFilter] = useState('All');
   const [apvStatusFilter, setApvStatusFilter] = useState('All');
   const [treasuryStatusFilter, setTreasuryStatusFilter] = useState('All');
-  const [importType, setImportType] = useState<'purchases' | 'apvs'>('purchases');
+  const [importType, setImportType] = useState<'purchases' | 'apvs' | 'treasury'>('purchases');
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importingStatus, setImportingStatus] = useState('');
 
@@ -275,6 +299,49 @@ export default function App() {
 
   const tabFilteredPurchases = useMemo(() => baseFilteredPurchases.filter(p => poStatusFilter === 'All' || p.status === poStatusFilter), [baseFilteredPurchases, poStatusFilter]);
   const tabFilteredApvs = useMemo(() => baseFilteredApvs.filter(a => apvStatusFilter === 'All' || a.status === apvStatusFilter), [baseFilteredApvs, apvStatusFilter]);
+
+  const computedRecommendedEwt = useMemo(() => {
+    if (!newApv.poId) return { ewt: 0, reason: 'No PO linked yet.', itemsBreakdown: [] };
+    const linkedPo = purchases.find(p => p.id === newApv.poId);
+    if (!linkedPo) return { ewt: 0, reason: 'Linked purchase order not found.', itemsBreakdown: [] };
+
+    const billAmt = newApv.originalAmount ?? newApv.amount ?? 0;
+
+    if (linkedPo.items && linkedPo.items.length > 0) {
+      let sumEwt = 0;
+      const breakdown: string[] = [];
+      linkedPo.items.forEach((it: any) => {
+        const netVal = it.totalPrice ?? (it.qty * it.unitPrice);
+        const isService = it.itemType === 'Services' || String(it.description || '').toLowerCase().includes('service');
+        const rate = isService ? 0.02 : 0.01;
+        const itemEwt = netVal * rate;
+        sumEwt += itemEwt;
+        breakdown.push(`• ${it.description || 'Item'} (${isService ? 'Services @ 2%' : 'Goods @ 1%'}): ₱${netVal.toLocaleString('en-US', { minimumFractionDigits: 2 })} → ₱${itemEwt.toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
+      });
+      return { 
+        ewt: Math.round(sumEwt * 100) / 100, 
+        reason: 'Summed item-by-item from linked PO Line Items (Goods @ 1%, Services @ 2% of VAT-exclusive net amount)', 
+        itemsBreakdown: breakdown 
+      };
+    } else {
+      const isTrading = newApv.category === 'Trading';
+      const rate = isTrading ? 0.01 : 0.02;
+      const vatBase = billAmt / 1.12;
+      const ewtWithVat = vatBase * rate;
+      const ewtWithoutVat = billAmt * rate;
+      
+      return {
+        ewt: Math.round(ewtWithVat * 100) / 100,
+        ewtAlternative: Math.round(ewtWithoutVat * 100) / 100,
+        reason: `Estimated from APV Category (${newApv.category || 'Freshman'} assumes ${isTrading ? 'Goods @ 1% EWT' : 'Services @ 2% EWT'})`,
+        itemsBreakdown: [
+          `Category: ${newApv.category || 'Freshman'} (${isTrading ? 'Goods' : 'Services'})`,
+          `Option A (VAT-Inclusive 12%): Base ₱${vatBase.toLocaleString('en-US', { minimumFractionDigits: 2 })} → ${(rate*100)}% EWT = ₱${ewtWithVat.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+          `Option B (Non-VAT / Exempt): Base ₱${billAmt.toLocaleString('en-US', { minimumFractionDigits: 2 })} → ${(rate*100)}% EWT = ₱${ewtWithoutVat.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+        ]
+      };
+    }
+  }, [newApv.poId, newApv.originalAmount, newApv.amount, newApv.category, purchases]);
 
   const filteredAuditLogs = useMemo(() => {
     const query = globalSearchQuery.toLowerCase();
@@ -559,8 +626,15 @@ export default function App() {
       discountAmount: po.discountAmount || 0, 
       paymentTerms: po.paymentTerms || 'Terms', 
       remarks: po.remarks || '', 
-      attachmentData: po.attachmentData || '' 
+      attachmentData: po.attachmentData || '',
+      items: po.items || []
     }); 
+    setPoItemDesc('');
+    setPoItemQty('');
+    setPoItemPrice('');
+    setPoItemType('Goods');
+    setPoItemTaxRate(12);
+    setEditingLineItemId(null);
     setIsPoModalOpen(true); 
   };
 
@@ -568,7 +642,6 @@ export default function App() {
     setEditingApvId(apv.id); 
     setNewApv({ 
       ...apv, 
-      businessUnit: apv.businessUnit || 'ETMC', 
       category: apv.category || 'Freshman', 
       amount: apv.amount, 
       paymentTerms: apv.paymentTerms || 'Terms', 
@@ -588,9 +661,180 @@ export default function App() {
     setIsReceiveModalOpen(true); 
   };
 
+  const handleEditPoItemSelect = (item: OrderItem) => {
+    setPoItemDesc(item.description);
+    setPoItemQty(item.qty);
+    setPoItemPrice(item.unitPrice);
+    setPoItemType(item.itemType);
+    setPoItemTaxRate(item.taxRate);
+    setEditingLineItemId(item.id || null);
+  };
+
+  const handleCancelLineItemEdit = () => {
+    setPoItemDesc('');
+    setPoItemQty('');
+    setPoItemPrice('');
+    setPoItemType('Goods');
+    setPoItemTaxRate(12);
+    setEditingLineItemId(null);
+  };
+
+  const calculateTypeTotals = (type: 'Goods' | 'Services') => {
+    return (newPo.items || [])
+      .filter(it => it.itemType === type && !it.description.toLowerCase().includes('input vat'))
+      .reduce((sum, it) => sum + it.totalPrice, 0);
+  };
+
+  const handleAutoAddInputVat = (type: 'Goods' | 'Services') => {
+    const totalNet = calculateTypeTotals(type);
+    if (totalNet === 0) {
+      alert(`There are no standard ${type} items in this P.O. to compute 12% Input VAT for.`);
+      return;
+    }
+
+    const calculatedVat = totalNet * 0.12;
+    const vatDesc = `12% Input VAT - ${type}`;
+    
+    // Check if there's already an existing input VAT line for this type
+    const existingIdx = (newPo.items || []).findIndex(it => it.description === vatDesc);
+    let updatedItems = [...(newPo.items || [])];
+
+    if (existingIdx >= 0) {
+      // update the existing
+      updatedItems[existingIdx] = {
+        ...updatedItems[existingIdx],
+        unitPrice: calculatedVat,
+        totalPrice: calculatedVat,
+        taxAmount: 0 // the item itself is the tax
+      };
+    } else {
+      // insert new list item
+      updatedItems.push({
+        id: crypto.randomUUID(),
+        description: vatDesc,
+        qty: 1,
+        unitPrice: calculatedVat,
+        totalPrice: calculatedVat,
+        itemType: type,
+        taxRate: 0,
+        taxAmount: 0
+      });
+    }
+
+    const newGross = updatedItems.reduce((sum, it) => sum + it.totalPrice, 0);
+    const newTax = updatedItems.reduce((sum, it) => sum + (it.taxAmount || 0), 0);
+    setNewPo({
+      ...newPo,
+      items: updatedItems,
+      grossAmount: newGross,
+      taxAmount: newTax,
+      amount: calculatePoNetAmount(newGross, newTax, newPo.discountAmount || 0, isPoRoundOff)
+    });
+  };
+
+  const handleFillInputVatForm = (type: 'Goods' | 'Services') => {
+    const totalNet = calculateTypeTotals(type);
+    const calculatedVat = totalNet * 0.12;
+    
+    setPoItemDesc(`12% Input VAT - ${type}`);
+    setPoItemQty(1);
+    setPoItemPrice(calculatedVat);
+    setPoItemType(type);
+    setPoItemTaxRate(0); // This line is the tax itself, so non-vatable
+  };
+
+  const handleAddPoItem = () => {
+    if (!poItemDesc.trim() || !poItemQty || !poItemPrice) {
+      alert("Please specify Item Description, Qty, and Unit Price.");
+      return;
+    }
+    const qtyNum = Number(poItemQty);
+    const priceNum = Number(poItemPrice);
+    if (qtyNum <= 0 || priceNum <= 0) {
+      alert("Quantity and Unit Price must be greater than zero.");
+      return;
+    }
+
+    const calculatedTax = (qtyNum * priceNum) * (Number(poItemTaxRate) / 100);
+
+    let updatedItems = [];
+    if (editingLineItemId) {
+      updatedItems = (newPo.items || []).map(it => {
+        if (it.id === editingLineItemId) {
+          return {
+            ...it,
+            description: poItemDesc.trim(),
+            qty: qtyNum,
+            unitPrice: priceNum,
+            totalPrice: qtyNum * priceNum,
+            itemType: poItemType,
+            taxRate: Number(poItemTaxRate),
+            taxAmount: calculatedTax
+          };
+        }
+        return it;
+      });
+      setEditingLineItemId(null);
+    } else {
+      const newItem: OrderItem = {
+        id: crypto.randomUUID(),
+        description: poItemDesc.trim(),
+        qty: qtyNum,
+        unitPrice: priceNum,
+        totalPrice: qtyNum * priceNum,
+        itemType: poItemType,
+        taxRate: Number(poItemTaxRate),
+        taxAmount: calculatedTax
+      };
+      updatedItems = [...(newPo.items || []), newItem];
+    }
+
+    const newGross = updatedItems.reduce((sum, it) => sum + it.totalPrice, 0);
+    const newTax = updatedItems.reduce((sum, it) => sum + (it.taxAmount || 0), 0);
+    setNewPo({
+      ...newPo,
+      items: updatedItems,
+      grossAmount: newGross,
+      taxAmount: newTax,
+      amount: calculatePoNetAmount(newGross, newTax, newPo.discountAmount || 0, isPoRoundOff)
+    });
+
+    setPoItemDesc('');
+    setPoItemQty('');
+    setPoItemPrice('');
+    // keep previous itemType and taxRate as convenient defaults for the next line item
+  };
+
+  const handleRemovePoItem = (itemId: string) => {
+    const updatedItems = (newPo.items || []).filter(item => item.id !== itemId);
+    const newGross = updatedItems.reduce((sum, it) => sum + it.totalPrice, 0);
+    const newTax = updatedItems.reduce((sum, it) => sum + (it.taxAmount || 0), 0);
+    setNewPo({
+      ...newPo,
+      items: updatedItems,
+      grossAmount: newGross,
+      taxAmount: newTax,
+      amount: calculatePoNetAmount(newGross, newTax, newPo.discountAmount || 0, isPoRoundOff)
+    });
+    if (editingLineItemId === itemId) {
+      setPoItemDesc('');
+      setPoItemQty('');
+      setPoItemPrice('');
+      setPoItemType('Goods');
+      setPoItemTaxRate(12);
+      setEditingLineItemId(null);
+    }
+  };
+
   const openAddPo = () => { 
     setEditingPoId(null); 
-    setNewPo({ id: '', category: 'Freshman', prRequestor: '', processorName: '', prReceivedDate: '', date: '', expectedDelivery: '', receivedDate: null, vendor: '', description: '', amount: 0, grossAmount: 0, discountAmount: 0, paymentTerms: 'Terms', remarks: '', attachmentData: '', status: 'Pending' }); 
+    setNewPo({ id: '', category: 'Freshman', prRequestor: '', processorName: '', prReceivedDate: '', date: '', expectedDelivery: '', receivedDate: null, vendor: '', description: '', amount: 0, grossAmount: 0, discountAmount: 0, taxAmount: 0, paymentTerms: 'Terms', remarks: '', attachmentData: '', status: 'Pending', items: [] }); 
+    setPoItemDesc('');
+    setPoItemQty('');
+    setPoItemPrice('');
+    setPoItemType('Goods');
+    setPoItemTaxRate(12);
+    setEditingLineItemId(null);
     setIsPoModalOpen(true); 
   };
 
@@ -607,7 +851,8 @@ export default function App() {
         discountAmount: Number(newPo.discountAmount || 0), 
         status: poStatus, 
         receivedDate: newPo.receivedDate || null, 
-        attachmentData: newPo.attachmentData || null 
+        attachmentData: newPo.attachmentData || null,
+        items: newPo.items || []
       });
       await logAction(action, 'PO', newPo.id, `Vendor: ${newPo.vendor}, Amount: ${newPo.amount}, Status: ${poStatus}`);
       setIsPoModalOpen(false); 
@@ -619,7 +864,7 @@ export default function App() {
 
   const openAddApv = () => { 
     setEditingApvId(null); 
-    setNewApv({ id: '', poId: '', businessUnit: 'ETMC', category: 'Freshman', vendor: '', invoiceDate: '', dueDate: '', amount: 0, funded: false, fundedDate: '', settledDate: TODAY.toISOString().split('T')[0], paymentTerms: 'Terms', status: 'Unpaid', checkNumber: '', checkDate: '', releaseDate: null, checkStatus: 'Pending Check' }); 
+    setNewApv({ id: '', poId: '', category: 'Freshman', vendor: '', invoiceDate: '', dueDate: '', amount: 0, funded: false, fundedDate: '', settledDate: TODAY.toISOString().split('T')[0], paymentTerms: 'Terms', status: 'Unpaid', checkNumber: '', checkDate: '', releaseDate: null, checkStatus: 'Pending Check' }); 
     setIsApvModalOpen(true); 
   };
 
@@ -629,7 +874,6 @@ export default function App() {
     const isPaid = newApv.status === 'Paid';
     const baseApv = { 
       ...newApv, 
-      businessUnit: newApv.businessUnit || 'ETMC', 
       category: newApv.category || 'Freshman', 
       amount: Number(newApv.amount || 0), 
       status: newApv.status, 
@@ -764,45 +1008,219 @@ export default function App() {
         if (parsedData.length === 0) throw new Error("File is empty or incorrectly formatted.");
         setImportingStatus(`Uploading ${parsedData.length} records. Please wait...`);
         
-        const dbRef = getDbRef().collection(importType);
+        const collectionName = importType === 'treasury' ? 'apvs' : importType;
+        const dbRef = getDbRef().collection(collectionName);
         let successCount = 0;
-        for (let item of parsedData) {
-          if (!item.id) continue; 
-          item.amount = Number(item.amount?.replace(/[^0-9.-]+/g,"") || 0);
-          let cleanBU = (item.businessUnit || '').toUpperCase().trim();
-          item.businessUnit = ['ETMC', 'EMI', 'EHI'].includes(cleanBU) ? cleanBU : 'ETMC';
-          item.category = item.category || 'Freshman'; 
-          
-          if (importType === 'purchases') {
-            item.prReceivedDate = standardizeDate(item.prReceivedDate);
-            item.date = standardizeDate(item.date);
-            item.expectedDelivery = standardizeDate(item.expectedDelivery);
-            item.receivedDate = standardizeDate(item.receivedDate);
+        
+        // Let's hold our items grouped to merge multiple items for the same PO/APV
+        const groupedPurchases: { [key: string]: any } = {};
+        const groupedApvs: { [key: string]: any } = {};
 
-            item.grossAmount = Number(item.grossAmount?.replace(/[^0-9.-]+/g,"") || item.amount);
-            item.discountAmount = Number(item.discountAmount?.replace(/[^0-9.-]+/g,"") || 0);
-            item.paymentTerms = item.paymentTerms || 'Terms'; 
-            item.status = item.receivedDate ? 'Invoiced' : 'Pending';
-            item.remarks = item.remarks || ''; 
-            item.prRequestor = item.prRequestor || ''; 
-          } else {
-            item.invoiceDate = standardizeDate(item.invoiceDate);
-            item.dueDate = standardizeDate(item.dueDate);
-            item.settledDate = standardizeDate(item.settledDate);
-            item.fundedDate = standardizeDate(item.fundedDate);
-            item.checkDate = standardizeDate(item.checkDate);
-            item.releaseDate = standardizeDate(item.releaseDate);
-
-            item.funded = String(item.funded).toLowerCase() === 'true' || item.status === 'Paid';
-            if (item.funded && !item.fundedDate) item.fundedDate = item.settledDate || TODAY.toISOString().split('T')[0];
-            item.status = item.status || 'Unpaid'; 
-            item.paymentTerms = item.paymentTerms || 'Terms';
-            item.checkNumber = item.checkNumber || ''; 
-            item.checkStatus = item.checkStatus || 'Pending Check';
+        for (let row of parsedData) {
+          // Normalize keys of current row to lowercase, alphanumeric only
+          const normalizedRow: any = {};
+          for (let originalKey in row) {
+            const normKey = originalKey.trim().toLowerCase().replace(/[^a-z0-9%]/g, '');
+            normalizedRow[normKey] = row[originalKey];
           }
-          await dbRef.doc(item.id).set(item, { merge: true });
-          successCount++;
+
+          // Decide target record id
+          const poId = (normalizedRow.poreference || normalizedRow.poid || normalizedRow.id || '').trim();
+          const apvId = (normalizedRow.apvreference || normalizedRow.apvref || normalizedRow.apvid || normalizedRow.id || '').trim();
+
+          if (importType === 'purchases') {
+            if (!poId || poId === 'NO PO') continue;
+
+            // We look for itemized details
+            const itemDesc = (normalizedRow.itemdescription || normalizedRow.description || '').trim();
+            const itemQty = Number(normalizedRow.itemqty || normalizedRow.qty || 0);
+
+            // Parse or calculate order item if description and qty are specified
+            let orderItem: any = null;
+            if (itemDesc && itemQty > 0) {
+              const itemUnitPrice = Number(String(normalizedRow.itemunitprice || normalizedRow.unitprice || 0).replace(/[^0-9.-]+/g,""));
+              const itemTaxRate = Number(String(normalizedRow.itemtaxrate || normalizedRow.itemtaxratepercent || normalizedRow.taxrate || 12).replace(/[^0-9.-]+/g,""));
+              const itemTaxAmount = Number(String(normalizedRow.itemtaxamount || normalizedRow.taxamount || 0).replace(/[^0-9.-]+/g,""));
+              const itemTotalPrice = Number(String(normalizedRow.itemnetamount || normalizedRow.itemtotalamount || normalizedRow.totalprice || (itemQty * itemUnitPrice)).replace(/[^0-9.-]+/g,""));
+
+              orderItem = {
+                id: Math.random().toString(36).substring(2, 9),
+                description: itemDesc,
+                qty: itemQty,
+                unitPrice: itemUnitPrice,
+                totalPrice: itemTotalPrice,
+                itemType: (normalizedRow.itemtype || '').toLowerCase().includes('service') ? 'Services' : 'Goods',
+                taxRate: itemTaxRate,
+                taxAmount: itemTaxAmount
+              };
+            }
+
+            // If we haven't initialized this PO in our grouping yet, set the core metadata
+            if (!groupedPurchases[poId]) {
+              const rawAmount = normalizedRow.pototalamount || normalizedRow.poamount || normalizedRow.amount || '0';
+              const cleanAmount = Number(String(rawAmount).replace(/[^0-9.-]+/g,""));
+
+              const rawGross = normalizedRow.grossamount || rawAmount;
+              const cleanGross = Number(String(rawGross).replace(/[^0-9.-]+/g,""));
+
+              const rawDiscount = normalizedRow.discountsaved || normalizedRow.discountamount || '0';
+              const cleanDiscount = Number(String(rawDiscount).replace(/[^0-9.-]+/g,""));
+
+              const rawCat = (normalizedRow.category || '').trim().toLowerCase();
+              const poCategory = rawCat === 'trading' ? 'Trading' : 'Freshman';
+
+              groupedPurchases[poId] = {
+                id: poId,
+                category: poCategory,
+                prReceivedDate: standardizeDate(normalizedRow.prreceiveddate || normalizedRow.date || ''),
+                date: standardizeDate(normalizedRow.poissuedate || normalizedRow.date || ''),
+                expectedDelivery: standardizeDate(normalizedRow.expecteddelivery || ''),
+                receivedDate: standardizeDate(normalizedRow.actualreceiveddate || normalizedRow.receiveddate || ''),
+                vendor: normalizedRow.vendor || '',
+                description: normalizedRow.remarksdescription || normalizedRow.remarks || normalizedRow.description || '',
+                amount: cleanAmount,
+                grossAmount: cleanGross,
+                discountAmount: cleanDiscount,
+                paymentTerms: normalizedRow.paymentterms || 'Terms',
+                prRequestor: normalizedRow.prrequestor || '',
+                processorName: normalizedRow.processor || normalizedRow.processorname || '',
+                remarks: normalizedRow.remarks || '',
+                status: (standardizeDate(normalizedRow.actualreceiveddate || normalizedRow.receiveddate || '')) ? 'Invoiced' : 'Pending',
+                items: []
+              };
+            }
+
+            if (orderItem) {
+              groupedPurchases[poId].items.push(orderItem);
+            }
+          } else if (importType === 'treasury') {
+            // Treasury check details update
+            const finalApvId = (apvId && apvId !== 'NO APV YET') ? apvId : null;
+            if (!finalApvId) continue;
+
+            const rawCheckNumber = (normalizedRow.checknumber || normalizedRow.check || normalizedRow.checkdetailscheck || '').trim();
+            const rawCheckDate = standardizeDate(normalizedRow.checkdate || normalizedRow.checkissuedate || '');
+            const rawReleaseDate = standardizeDate(normalizedRow.releasedate || normalizedRow.checkrelease || normalizedRow.checkcollected || normalizedRow.checkreleasecollected || normalizedRow.collecteddate || normalizedRow.settleddate || '');
+
+            let checkStatus = normalizedRow.checkstatus || 'Pending Check';
+            if (rawReleaseDate) {
+              checkStatus = 'Collected';
+            } else if (rawCheckNumber) {
+              checkStatus = 'Check Created';
+            }
+
+            const isPaid = normalizedRow.apvstatus === 'Paid' || normalizedRow.status === 'Paid' || String(normalizedRow.funded).toLowerCase() === 'true' || checkStatus === 'Collected';
+
+            const treasuryUpdate: any = {
+              id: finalApvId,
+              checkNumber: rawCheckNumber,
+              checkDate: rawCheckDate,
+              checkStatus: checkStatus,
+              releaseDate: rawReleaseDate || null
+            };
+
+            // Only map these optionally to keep existing records safe from empty cells
+            if (normalizedRow.poid || normalizedRow.poreference) {
+              treasuryUpdate.poId = (normalizedRow.poid || normalizedRow.poreference || '').trim();
+            }
+            if (normalizedRow.vendor) {
+              treasuryUpdate.vendor = normalizedRow.vendor.trim();
+            }
+            if (normalizedRow.category) {
+              const rawCat = (normalizedRow.category || '').trim().toLowerCase();
+              treasuryUpdate.category = rawCat === 'trading' ? 'Trading' : 'Freshman';
+            }
+            if (normalizedRow.apvamount || normalizedRow.amount) {
+              const rawAmount = normalizedRow.apvamount || normalizedRow.amount || '0';
+              treasuryUpdate.amount = Number(String(rawAmount).replace(/[^0-9.-]+/g,""));
+            }
+            if (isPaid || rawReleaseDate) {
+              treasuryUpdate.status = 'Paid';
+              treasuryUpdate.funded = true;
+              treasuryUpdate.fundedDate = rawReleaseDate || TODAY.toISOString().split('T')[0];
+              treasuryUpdate.settledDate = rawReleaseDate || TODAY.toISOString().split('T')[0];
+            }
+
+            groupedApvs[finalApvId] = {
+              ...(groupedApvs[finalApvId] || {}),
+              ...treasuryUpdate
+            };
+          } else {
+            // APV Records import
+            const finalApvId = (apvId && apvId !== 'NO APV YET') ? apvId : null;
+            if (!finalApvId) continue;
+            
+            if (!groupedApvs[finalApvId]) {
+              const rawAmount = normalizedRow.apvamount || normalizedRow.amount || '0';
+              const cleanAmount = Number(String(rawAmount).replace(/[^0-9.-]+/g,""));
+
+              const rawCat = (normalizedRow.category || '').trim().toLowerCase();
+              const apvCategory = rawCat === 'trading' ? 'Trading' : 'Freshman';
+
+              const status = normalizedRow.apvstatus || normalizedRow.status || 'Unpaid';
+              
+              const rawCheckNumber = (normalizedRow.checknumber || normalizedRow.check || normalizedRow.checkdetailscheck || '').trim();
+              const rawCheckDate = standardizeDate(normalizedRow.checkdate || normalizedRow.checkissuedate || '');
+              const rawReleaseDate = standardizeDate(normalizedRow.releasedate || normalizedRow.checkrelease || normalizedRow.checkcollected || normalizedRow.checkreleasecollected || normalizedRow.collecteddate || normalizedRow.settleddate || '');
+
+              let checkStatus = normalizedRow.checkstatus || 'Pending Check';
+              if (rawReleaseDate) {
+                checkStatus = 'Collected';
+              } else if (rawCheckNumber) {
+                checkStatus = 'Check Created';
+              }
+
+              const isPaid = status === 'Paid' || String(normalizedRow.funded).toLowerCase() === 'true' || checkStatus === 'Collected';
+
+              groupedApvs[finalApvId] = {
+                id: finalApvId,
+                poId: poId === 'NO PO' ? '' : poId,
+                category: apvCategory,
+                vendor: normalizedRow.vendor || '',
+                invoiceDate: standardizeDate(normalizedRow.apvinvoicedate || normalizedRow.invoicedate || ''),
+                dueDate: standardizeDate(normalizedRow.apvduedate || normalizedRow.duedate || ''),
+                amount: cleanAmount,
+                paymentTerms: normalizedRow.paymentterms || 'Terms',
+                status: isPaid ? 'Paid' : 'Unpaid',
+                funded: isPaid,
+                fundedDate: isPaid ? (rawReleaseDate || standardizeDate(normalizedRow.fundeddate || '') || TODAY.toISOString().split('T')[0]) : '',
+                settledDate: isPaid ? (rawReleaseDate || TODAY.toISOString().split('T')[0]) : '',
+                checkNumber: rawCheckNumber,
+                checkDate: rawCheckDate,
+                checkStatus: checkStatus,
+                releaseDate: rawReleaseDate || null
+              };
+            }
+          }
         }
+
+        // Upload to database
+        if (importType === 'purchases') {
+          for (let poId in groupedPurchases) {
+            const po = groupedPurchases[poId];
+
+            // If we successfully aggregated items, recalculate gross, tax and net to be perfectly consistent!
+            if (po.items && po.items.length > 0) {
+              const totalGross = po.items.reduce((sum: number, it: any) => sum + it.totalPrice, 0);
+              const totalTax = po.items.reduce((sum: number, it: any) => sum + (it.taxAmount || 0), 0);
+              
+              po.grossAmount = totalGross;
+              po.taxAmount = totalTax;
+              // net amount = gross + tax - discount
+              po.amount = Math.max(0, totalGross + totalTax - po.discountAmount);
+            }
+
+            await dbRef.doc(poId).set(po, { merge: true });
+            successCount++;
+          }
+        } else {
+          for (let apvId in groupedApvs) {
+            const apv = groupedApvs[apvId];
+            await dbRef.doc(apvId).set(apv, { merge: true });
+            successCount++;
+          }
+        }
+
         await logAction('IMPORT', 'BATCH', importType.toUpperCase(), `Imported ${successCount} records via CSV.`);
         setImportingStatus(`Success! Uploaded ${successCount} records.`);
         setTimeout(() => { setIsImportModalOpen(false); setImportFile(null); setImportingStatus(''); }, 2000);
@@ -823,9 +1241,11 @@ export default function App() {
 
     let csvContent = "\uFEFF"; // BOM for Excel
     const headers = [
-      "APV Reference", "PO Reference", "Vendor", "Business Unit", "Category",
-      "PR Requestor", "Processor", "PO Issue Date", "Expected Delivery", "Actual Received Date", 
-      "PO Amount", "Discount Saved", "APV Invoice Date", "APV Due Date", "APV Amount",
+      "APV Reference", "PO Reference", "Vendor", "Category",
+      "PR Requestor", "Processor", "PO Issue Date",
+      "Item Description", "Item QTY", "Item Unit Price", "Item Net Amount", "Item Tax Rate %", "Item Tax Amount", "Item Total Amount",
+      "Expected Delivery", "Actual Received Date", 
+      "PO Total Amount", "Discount Saved", "APV Invoice Date", "APV Due Date", "APV Amount",
       "APV Status", "Aging Category", "Check Number", "Check Status", "Release/Settled Date",
       "Payment Terms", "Remarks/Description"
     ];
@@ -849,24 +1269,63 @@ export default function App() {
         linkedApvs.forEach(apv => {
           exportedApvIds.add(apv.id);
           const aging = getAgingCategory(apv.dueDate, apv.status, TODAY);
-          const row = [
-            apv.id, po.id, apv.vendor, apv.businessUnit || 'ETMC', apv.category || po.category,
-            po.prRequestor, po.processorName, po.date, po.expectedDelivery, po.receivedDate,
-            po.amount, po.discountAmount, apv.invoiceDate, apv.dueDate, apv.amount,
-            apv.status, aging, apv.checkNumber, apv.checkStatus, apv.settledDate || apv.releaseDate,
-            apv.paymentTerms, (po.description || '') + (po.remarks ? " - " + po.remarks : "")
-          ];
-          csvContent += row.map(escapeCSV).join(",") + "\r\n";
+          
+          if (po.items && po.items.length > 0) {
+            po.items.forEach(i => {
+              const netVal = i.totalPrice ?? (i.qty * i.unitPrice);
+              const totalVal = netVal + (i.taxAmount || 0);
+              const row = [
+                apv.id, po.id, apv.vendor, apv.category || po.category,
+                po.prRequestor, po.processorName, po.date,
+                i.description, i.qty, i.unitPrice, netVal, i.taxRate, i.taxAmount || 0, totalVal,
+                po.expectedDelivery, po.receivedDate,
+                po.amount, po.discountAmount, apv.invoiceDate, apv.dueDate, apv.amount,
+                apv.status, aging, apv.checkNumber, apv.checkStatus, apv.settledDate || apv.releaseDate,
+                apv.paymentTerms, (po.description || '') + (po.remarks ? " - " + po.remarks : "")
+              ];
+              csvContent += row.map(escapeCSV).join(",") + "\r\n";
+            });
+          } else {
+            const row = [
+              apv.id, po.id, apv.vendor, apv.category || po.category,
+              po.prRequestor, po.processorName, po.date,
+              "", "", "", "", "", "", "",
+              po.expectedDelivery, po.receivedDate,
+              po.amount, po.discountAmount, apv.invoiceDate, apv.dueDate, apv.amount,
+              apv.status, aging, apv.checkNumber, apv.checkStatus, apv.settledDate || apv.releaseDate,
+              apv.paymentTerms, (po.description || '') + (po.remarks ? " - " + po.remarks : "")
+            ];
+            csvContent += row.map(escapeCSV).join(",") + "\r\n";
+          }
         });
       } else {
-        const row = [
-          "NO APV YET", po.id, po.vendor, "ETMC", po.category,
-          po.prRequestor, po.processorName, po.date, po.expectedDelivery, po.receivedDate,
-          po.amount, po.discountAmount, "", "", "",
-          "Pending APV", "", "", "", "",
-          po.paymentTerms, (po.description || '') + (po.remarks ? " - " + po.remarks : "")
-        ];
-        csvContent += row.map(escapeCSV).join(",") + "\r\n";
+        if (po.items && po.items.length > 0) {
+          po.items.forEach(i => {
+            const netVal = i.totalPrice ?? (i.qty * i.unitPrice);
+            const totalVal = netVal + (i.taxAmount || 0);
+            const row = [
+              "NO APV YET", po.id, po.vendor, po.category,
+              po.prRequestor, po.processorName, po.date,
+              i.description, i.qty, i.unitPrice, netVal, i.taxRate, i.taxAmount || 0, totalVal,
+              po.expectedDelivery, po.receivedDate,
+              po.amount, po.discountAmount, "", "", "",
+              "Pending APV", "", "", "", "",
+              po.paymentTerms, (po.description || '') + (po.remarks ? " - " + po.remarks : "")
+            ];
+            csvContent += row.map(escapeCSV).join(",") + "\r\n";
+          });
+        } else {
+          const row = [
+            "NO APV YET", po.id, po.vendor, po.category,
+            po.prRequestor, po.processorName, po.date,
+            "", "", "", "", "", "", "",
+            po.expectedDelivery, po.receivedDate,
+            po.amount, po.discountAmount, "", "", "",
+            "Pending APV", "", "", "", "",
+            po.paymentTerms, (po.description || '') + (po.remarks ? " - " + po.remarks : "")
+          ];
+          csvContent += row.map(escapeCSV).join(",") + "\r\n";
+        }
       }
     });
 
@@ -874,8 +1333,10 @@ export default function App() {
       if (!exportedApvIds.has(apv.id)) {
         const aging = getAgingCategory(apv.dueDate, apv.status, TODAY);
         const row = [
-          apv.id, apv.poId || "NO PO", apv.vendor, apv.businessUnit || 'ETMC', apv.category,
-          "", "", "", "", "",
+          apv.id, apv.poId || "NO PO", apv.vendor, apv.category,
+          "", "", "",
+          "", "", "", "", "", "", "",
+          "", "",
           "", "", apv.invoiceDate, apv.dueDate, apv.amount,
           apv.status, aging, apv.checkNumber, apv.checkStatus, apv.settledDate || apv.releaseDate,
           apv.paymentTerms, ""
@@ -1410,12 +1871,50 @@ export default function App() {
                 <select value={importType} onChange={e => setImportType(e.target.value as any)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-50 bg-white cursor-pointer">
                   <option value="purchases">Purchase Orders</option>
                   <option value="apvs">APV Records</option>
+                  <option value="treasury">Treasury Records (Checks & Collections)</option>
                 </select>
               </div>
               <div className="bg-blue-50 border border-blue-100 p-3 rounded-lg">
-                <label className="block text-[10px] font-bold text-blue-800 uppercase tracking-wide mb-1 flex items-center"><AlertCircle size={12} className="mr-1"/> Required CSV Headers</label>
-                <p className="text-xs text-blue-700 font-mono break-all">{importType === 'purchases' ? "id, businessUnit, category, prReceivedDate, date, expectedDelivery, receivedDate, vendor, description, amount, grossAmount, discountAmount, paymentTerms, prRequestor, processorName, remarks" : "id, poId, businessUnit, category, vendor, invoiceDate, dueDate, amount, paymentTerms, status, settledDate"}</p>
-                <p className="text-[10px] text-blue-600 mt-2 font-bold italic border-t border-blue-200 pt-2"><Sparkles size={10} className="inline mr-1" /> Smart Date Parser is active! Supported formats include YYYY-MM-DD, MM/DD/YYYY, and raw Excel index days.</p>
+                <label className="block text-[10px] font-bold text-blue-800 uppercase tracking-wide mb-1 flex items-center">
+                  <AlertCircle size={12} className="mr-1"/> Recommended CSV Columns
+                </label>
+                {importType === 'purchases' ? (
+                  <div className="space-y-1.5 text-xs text-blue-700">
+                    <p className="font-semibold text-[10px] text-blue-900 uppercase">Option A: Detailed Report Format (Splits items to multiple rows)</p>
+                    <p className="font-mono break-all p-1.5 bg-white/60 rounded border border-blue-200">
+                      PO Reference, Vendor, Category, PR Requestor, Processor, PO Issue Date, Item Description, Item QTY, Item Unit Price, Expected Delivery, Actual Received Date, Discount Saved, Payment Terms, Remarks/Description
+                    </p>
+                    <p className="font-semibold text-[10px] text-blue-900 uppercase">Option B: Simple Format</p>
+                    <p className="font-mono break-all p-1.5 bg-white/60 rounded border border-blue-100 italic">
+                      id, category, prReceivedDate, date, expectedDelivery, receivedDate, vendor, description, amount, grossAmount, discountAmount, paymentTerms, prRequestor, processorName, remarks
+                    </p>
+                  </div>
+                ) : importType === 'apvs' ? (
+                  <div className="space-y-1.5 text-xs text-blue-700">
+                    <p className="font-semibold text-[10px] text-blue-900 uppercase">Option A: General Outbound Format</p>
+                    <p className="font-mono break-all p-1.5 bg-white/60 rounded border border-blue-200">
+                      APV Reference, PO Reference, Vendor, Category, Payment Terms, APV Invoice Date, APV Due Date, APV Amount, APV Status, Check Number, Check Date, Check Status, Release/Settled Date
+                    </p>
+                    <p className="font-semibold text-[10px] text-blue-900 uppercase">Option B: Simple Format</p>
+                    <p className="font-mono break-all p-1.5 bg-white/60 rounded border border-blue-100 italic">
+                      id, poId, category, vendor, invoiceDate, dueDate, amount, paymentTerms, status, settledDate, checkNumber, checkDate, releaseDate
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 text-xs text-blue-700">
+                    <p className="font-semibold text-[10px] text-blue-900 uppercase">Treasury Log Format (Overwrites/Merges with existing APVs)</p>
+                    <p className="font-mono break-all p-1.5 bg-white/60 rounded border border-blue-200">
+                      APV Reference, Check Number, Check Date, Check Status, Release/Collected Date
+                    </p>
+                    <p className="font-semibold text-[10px] text-blue-900 uppercase">Simple Alternative Format</p>
+                    <p className="font-mono break-all p-1.5 bg-white/60 rounded border border-blue-100 italic">
+                      id, checkNumber, checkDate, checkStatus, releaseDate
+                    </p>
+                  </div>
+                )}
+                <p className="text-[10px] text-blue-600 mt-2 font-bold italic border-t border-blue-200 pt-2 flex items-center">
+                  <Sparkles size={10} className="mr-1 shrink-0" /> Multi-row grouping acts automatically! Rows with matching PO references will merge into custom item lists.
+                </p>
               </div>
               <div>
                 <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-2">2. Upload File</label>
@@ -1567,7 +2066,7 @@ export default function App() {
             <form onSubmit={handleAddApvSubmit} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div><label className="text-[10px] uppercase font-bold text-gray-500">APV Number</label><input required readOnly={!!editingApvId} value={newApv.id} onChange={e => setNewApv({...newApv, id: e.target.value})} className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none ${editingApvId ? 'bg-gray-100 border-gray-200 cursor-not-allowed' : 'border-gray-200'}`} /></div>
-                <div><label className="text-[10px] uppercase font-bold text-gray-500">PO Ref</label><input required value={newApv.poId} onChange={e => { const val = e.target.value; const matched = purchases.find(p => p.id === val); setNewApv({...newApv, poId: val, ...(matched ? {vendor: matched.vendor || '', businessUnit: matched.businessUnit || 'ETMC', category: matched.category || 'Freshman', amount: matched.amount || 0} : {})}); }} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" /></div>
+                <div><label className="text-[10px] uppercase font-bold text-gray-500">PO Ref</label><input required value={newApv.poId} onChange={e => { const val = e.target.value; const matched = purchases.find(p => p.id === val); setNewApv({...newApv, poId: val, ...(matched ? {vendor: matched.vendor || '', category: matched.category || 'Freshman', amount: matched.amount || 0, originalAmount: matched.amount || 0, withheldTax: 0} : {})}); }} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" /></div>
               </div>
               <div>
                 <label className="text-[10px] uppercase font-bold text-gray-500">Vendor</label>
@@ -1577,14 +2076,137 @@ export default function App() {
                 <div><label className="text-[10px] uppercase font-bold text-gray-500">Invoice Date</label><input required type="date" value={newApv.invoiceDate} onChange={e => setNewApv({...newApv, invoiceDate: e.target.value})} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white" /></div>
                 <div><label className="text-[10px] uppercase font-bold text-gray-500">Due Date</label><input required type="date" value={newApv.dueDate} onChange={e => setNewApv({...newApv, dueDate: e.target.value})} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white" /></div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><label className="text-[10px] uppercase font-bold text-gray-500">Billed Amount (₱)</label><input required type="number" step="0.01" value={newApv.amount || ''} onChange={e => setNewApv({...newApv, amount: Number(e.target.value)})} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" /></div>
-                <div>
-                  <label className="text-[10px] uppercase font-bold text-gray-500">Category</label>
-                  <select value={newApv.category || 'Freshman'} onChange={e => setNewApv({...newApv, category: e.target.value})} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white cursor-pointer">
-                    <option value="Freshman">Freshman</option>
-                    <option value="Trading">Trading</option>
-                  </select>
+              
+              <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-3">
+                <div className="flex justify-between items-center border-b border-gray-200 pb-2">
+                  <span className="text-[10px] font-black uppercase text-indigo-900 tracking-wider flex items-center gap-1">
+                    <Sparkles size={12} className="text-indigo-500 animate-pulse" /> 
+                    Withheld Tax Auto-Detector (EWT)
+                  </span>
+                  <span className="text-[9px] text-indigo-700 font-bold bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-100">Adjustments Tool</span>
+                </div>
+
+                {newApv.poId ? (
+                  <div className="space-y-2">
+                    <div className="text-xs text-gray-600 bg-indigo-50/50 border border-indigo-100 p-2.5 rounded-lg space-y-1">
+                      <div className="font-bold text-indigo-950 flex justify-between items-center text-[10px]">
+                        <span>RECOMMENDED WITHHOLDINGS:</span>
+                        <span className="text-xs text-indigo-600 bg-indigo-100/80 font-mono px-2 py-0.5 rounded-full font-black">
+                          ₱{computedRecommendedEwt.ewt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-indigo-700 italic">{computedRecommendedEwt.reason}</p>
+                      {computedRecommendedEwt.itemsBreakdown.length > 0 && (
+                        <div className="mt-1.5 space-y-1 pt-1.5 border-t border-indigo-100 text-[9px] font-mono text-indigo-900 max-h-24 overflow-y-auto">
+                          {computedRecommendedEwt.itemsBreakdown.map((itemStr, idx) => (
+                            <div key={idx} className="truncate select-all text-xs leading-normal">{itemStr}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button 
+                        type="button" 
+                        onClick={() => {
+                          const ewt = computedRecommendedEwt.ewt;
+                          setNewApv(prev => {
+                            const baseAmt = prev.originalAmount || prev.amount || 0;
+                            return {
+                              ...prev,
+                              withheldTax: ewt,
+                              amount: Math.max(0, baseAmt - ewt)
+                            };
+                          });
+                        }}
+                        className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer flex items-center justify-center gap-1 font-bold"
+                      >
+                        🎯 Apply Recommended EWT
+                      </button>
+                      {computedRecommendedEwt.ewtAlternative !== undefined && (
+                        <button 
+                          type="button" 
+                          onClick={() => {
+                            const ewtAlt = computedRecommendedEwt.ewtAlternative!;
+                            setNewApv(prev => {
+                              const baseAmt = prev.originalAmount || prev.amount || 0;
+                              return {
+                                ...prev,
+                                withheldTax: ewtAlt,
+                                amount: Math.max(0, baseAmt - ewtAlt)
+                              };
+                            });
+                          }}
+                          className="flex-1 py-1.5 bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-700 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer"
+                        >
+                          Non-VAT (₱{computedRecommendedEwt.ewtAlternative.toLocaleString()})
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-gray-400 italic bg-gray-50 border border-gray-200 p-2.5 rounded-lg text-center">
+                    Link a Purchase Order (PO Ref) above to automatically analyze vatable line-items, goods, or services and auto-detect withholding taxes!
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <label className="text-[9px] uppercase font-black text-gray-400 block mb-0.5">Billed Gross (₱)</label>
+                    <input 
+                      required 
+                      type="number" 
+                      step="0.01" 
+                      value={newApv.originalAmount ?? newApv.amount ?? ''} 
+                      onChange={e => {
+                        const gross = Number(e.target.value);
+                        setNewApv(prev => ({
+                          ...prev,
+                          originalAmount: gross,
+                          amount: Math.max(0, gross - (prev.withheldTax || 0))
+                        }));
+                      }} 
+                      className="w-full px-2.5 py-1.5 border border-gray-200 rounded text-xs text-slate-800 font-bold bg-white" 
+                      placeholder="Gross Invoice"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[9px] uppercase font-black text-gray-400 block mb-0.5">Category</label>
+                    <select value={newApv.category || 'Freshman'} onChange={e => setNewApv({...newApv, category: e.target.value})} className="w-full px-2.5 py-1.5 border border-gray-200 rounded text-xs bg-white cursor-pointer text-slate-800 font-medium">
+                      <option value="Freshman">Freshman</option>
+                      <option value="Trading">Trading</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 pt-1 border-t border-gray-200/50">
+                  <div>
+                    <label className="text-[9px] uppercase font-black text-gray-400 block mb-0.5">Withheld EWT (₱)</label>
+                    <input 
+                      type="number" 
+                      step="0.01" 
+                      value={newApv.withheldTax ?? ''} 
+                      onChange={e => {
+                        const ewtVal = Number(e.target.value);
+                        setNewApv(prev => {
+                          const gross = prev.originalAmount ?? prev.amount ?? 0;
+                          return {
+                            ...prev,
+                            withheldTax: ewtVal,
+                            amount: Math.max(0, gross - ewtVal)
+                          };
+                        });
+                      }} 
+                      className="w-full px-2.5 py-1.5 border border-gray-200 rounded text-xs text-amber-700 font-bold bg-white font-mono text-right" 
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[9px] uppercase font-black text-indigo-900 block mb-0.5">Final Net Payable (₱)</label>
+                    <div className="w-full px-2.5 py-1.5 border border-indigo-150 bg-indigo-50/60 rounded text-xs text-indigo-700 font-black font-mono text-right">
+                      ₱{(newApv.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  </div>
                 </div>
               </div>
               <div className="flex gap-2 pt-4">
@@ -1599,7 +2221,7 @@ export default function App() {
       {/* PO Management Registry Modal */}
       {isPoModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 flex flex-col">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 flex flex-col">
             <div className="flex justify-between items-center mb-6">
               <h3 className="font-black text-xl text-slate-800 uppercase tracking-tighter">{editingPoId ? 'Edit Purchase Order' : 'New Purchase Order'}</h3>
               <button onClick={() => setIsPoModalOpen(false)} className="text-gray-400 cursor-pointer"><X size={20}/></button>
@@ -1617,10 +2239,311 @@ export default function App() {
                 <div><label className="text-[10px] uppercase font-bold text-gray-500">{newPo.category === 'Site Rental' || newPo.category === 'Services' ? 'Target Completion' : 'Expected Delivery'}</label><input required type="date" value={newPo.expectedDelivery} onChange={e => setNewPo({...newPo, expectedDelivery: e.target.value})} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white" /></div>
                 <div><label className="text-[10px] uppercase font-bold text-gray-500">{newPo.category === 'Site Rental' || newPo.category === 'Services' ? 'Completion Date' : 'Actual Received Date'} <span className="text-gray-400 font-normal lowercase">(Optional)</span></label><input type="date" value={newPo.receivedDate || ''} onChange={e => setNewPo({...newPo, receivedDate: e.target.value || null})} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white" /></div>
               </div>
-              <div className="grid grid-cols-3 gap-3">
-                <div><label className="text-[10px] uppercase font-bold text-gray-500">Gross Amt (₱)</label><input required type="number" step="0.01" value={newPo.grossAmount || ''} onChange={e => { const gross = Number(e.target.value); const discount = newPo.discountAmount || 0; const net = Math.max(0, gross - discount); setNewPo({...newPo, grossAmount: gross, amount: net}); }} className="w-full px-2.5 py-2 border rounded-lg text-sm border-gray-200 focus:ring-2 focus:ring-indigo-500" /></div>
-                <div><label className="text-[10px] uppercase font-bold text-emerald-600">Discount (₱)</label><input type="number" step="0.01" value={newPo.discountAmount || ''} onChange={e => { const discount = Number(e.target.value); const gross = newPo.grossAmount || 0; const net = Math.max(0, gross - discount); setNewPo({...newPo, discountAmount: discount, amount: net}); }} className="w-full px-2.5 py-2 border rounded-lg text-sm border-gray-200 focus:ring-2 focus:ring-emerald-500" /></div>
-                <div><label className="text-[10px] uppercase font-bold text-indigo-600">Net Amount (₱)</label><input disabled type="number" value={newPo.amount || ''} className="w-full px-2.5 py-2 border rounded-lg text-sm bg-indigo-50 text-indigo-800 font-bold border-indigo-200 cursor-not-allowed" /></div>
+              
+              {/* Detailed Item List & Prices Builder */}
+              <div className="bg-indigo-50/20 p-4 rounded-xl border border-indigo-100/60 space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-indigo-900 uppercase tracking-wide">P.O. Line Items & Tax Breakdown</span>
+                  <span className="text-[10px] text-indigo-600 px-3 py-0.5 bg-indigo-50 rounded-full font-bold">
+                    {newPo.items?.length || 0} items
+                  </span>
+                </div>
+
+                {editingLineItemId && (
+                  <div className="flex justify-between items-center bg-amber-50 border border-amber-200 text-amber-900 text-[10px] px-3 py-1.5 rounded-lg font-bold">
+                    <span className="flex items-center gap-1.5">✏️ Editing Line Item Details</span>
+                    <button 
+                      type="button" 
+                      onClick={handleCancelLineItemEdit} 
+                      className="text-amber-700 hover:text-amber-900 underline uppercase text-[9px] font-black cursor-pointer"
+                    >
+                      Cancel Edit
+                    </button>
+                  </div>
+                )}
+                
+                <div className="grid grid-cols-12 gap-2 shadow-sm bg-white p-3 rounded-lg border border-indigo-100/40">
+                  <div className="col-span-8">
+                    <label className="text-[9px] uppercase font-bold text-gray-400 block mb-0.5">Item Name / Desc</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. LAPTOP COREL I7 or Server Maintenance Service" 
+                      value={poItemDesc} 
+                      onChange={e => setPoItemDesc(e.target.value)} 
+                      className="w-full text-xs px-2.5 py-1.5 border border-gray-250 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white placeholder-gray-300 font-medium"
+                    />
+                  </div>
+                  <div className="col-span-4">
+                    <label className="text-[9px] uppercase font-bold text-gray-400 block mb-0.5">Classification</label>
+                    <select
+                      value={poItemType}
+                      onChange={e => setPoItemType(e.target.value as 'Goods' | 'Services')}
+                      className="w-full text-xs px-2 py-1.5 border border-gray-255 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white cursor-pointer font-bold text-indigo-900"
+                    >
+                      <option value="Goods">📦 Goods</option>
+                      <option value="Services">🛠️ Services</option>
+                    </select>
+                  </div>
+
+                  <div className="col-span-3">
+                    <label className="text-[9px] uppercase font-bold text-gray-400 block mb-0.5">Qty</label>
+                    <input 
+                      type="number" 
+                      min="1"
+                      placeholder="Qty" 
+                      value={poItemQty} 
+                      onChange={e => setPoItemQty(e.target.value === '' ? '' : Number(e.target.value))} 
+                      className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                    />
+                  </div>
+                  <div className="col-span-4">
+                    <label className="text-[9px] uppercase font-bold text-gray-400 block mb-0.5">Net Price (₱)</label>
+                    <input 
+                      type="number" 
+                      min="0.01"
+                      step="0.01"
+                      placeholder="Price" 
+                      value={poItemPrice} 
+                      onChange={e => setPoItemPrice(e.target.value === '' ? '' : Number(e.target.value))} 
+                      className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white text-right font-semibold"
+                    />
+                  </div>
+                  <div className="col-span-4">
+                    <label className="text-[9px] uppercase font-bold text-gray-400 block mb-0.5">Tax Scheme</label>
+                    <select
+                      value={poItemTaxRate}
+                      onChange={e => setPoItemTaxRate(Number(e.target.value))}
+                      className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white cursor-pointer text-slate-800"
+                    >
+                      <option value="12">12% VAT (Standard)</option>
+                      <option value="5">5% Withholding Tax (Services)</option>
+                      <option value="2">2% Withholding Tax (Services)</option>
+                      <option value="1">1% Withholding Tax (Goods)</option>
+                      <option value="0">0% Non-VAT / Exempt</option>
+                    </select>
+                  </div>
+                  <div className="col-span-1 flex items-end justify-center">
+                    <button 
+                      type="button" 
+                      onClick={handleAddPoItem} 
+                      className={`${editingLineItemId ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-indigo-600 hover:bg-indigo-700'} text-white rounded p-1.5 transition-colors w-full cursor-pointer flex items-center justify-center font-bold h-[30px]`}
+                      title={editingLineItemId ? "Update Line Item" : "Add Line Item"}
+                    >
+                      {editingLineItemId ? <Check size={16}/> : <Plus size={16}/>}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Specialized Input VAT Tools */}
+                <div className="bg-slate-50 border border-slate-200/80 rounded-lg p-2.5 space-y-2 text-xs">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] font-black uppercase text-indigo-900 tracking-wider">
+                      ✨ Input VAT Specialized Actions (12%)
+                    </span>
+                    <span className="text-[9px] text-gray-400 font-medium">Automatic computation based on net prices</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-white border border-slate-150 p-2 rounded-md space-y-1.5 shadow-sm">
+                      <div className="text-[10px] uppercase font-extrabold text-slate-500">For Goods Items:</div>
+                      <div className="flex gap-1 flex-row">
+                        <button
+                          type="button"
+                          onClick={() => handleAutoAddInputVat('Goods')}
+                          className="flex-1 px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-bold uppercase rounded border border-indigo-200 cursor-pointer transition-all text-center"
+                          title="Instantly generate standard 12% Input VAT line item for all current Goods"
+                        >
+                          ⚡ Append VAT Line
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleFillInputVatForm('Goods')}
+                          className="flex-1 px-2 py-1 bg-gray-55 hover:bg-gray-100 text-gray-700 text-[10px] font-semibold uppercase rounded border border-gray-200 cursor-pointer transition-all text-center"
+                          title="Fill the line item generator with calculated Input VAT on Goods"
+                        >
+                          📋 Fill Form
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-150 p-2 rounded-md space-y-1.5 shadow-sm">
+                      <div className="text-[10px] uppercase font-extrabold text-slate-500">For Services Items:</div>
+                      <div className="flex gap-1 flex-row">
+                        <button
+                          type="button"
+                          onClick={() => handleAutoAddInputVat('Services')}
+                          className="flex-1 px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-700 text-[10px] font-bold uppercase rounded border border-amber-200 cursor-pointer transition-all text-center"
+                          title="Instantly generate standard 12% Input VAT line item for all current Services"
+                        >
+                          ⚡ Append VAT Line
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleFillInputVatForm('Services')}
+                          className="flex-1 px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 text-[10px] font-semibold uppercase rounded border border-slate-200 cursor-pointer transition-all text-center"
+                          title="Fill the line item generator with calculated Input VAT on Services"
+                        >
+                          📋 Fill Form
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {newPo.items && newPo.items.length > 0 && (
+                  <div className="max-h-40 overflow-y-auto border border-gray-100 rounded-lg shadow-inner bg-white">
+                    <table className="w-full text-left text-[11px] border-collapse">
+                      <thead>
+                        <tr className="bg-gray-55/70 text-gray-500 font-bold border-b border-gray-100 uppercase text-[9px] sticky top-0 bg-slate-50 z-10">
+                          <th className="p-2">ITEM</th>
+                          <th className="p-2 text-center w-12">QTY</th>
+                          <th className="p-2 text-right w-20">NET PRICE</th>
+                          <th className="p-1 text-center w-24">TAX SCHEME</th>
+                          <th className="p-2 text-right w-20">TAX AMT</th>
+                          <th className="p-2 text-right w-20">TOTAL</th>
+                          <th className="p-2 text-center w-14"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50 font-medium text-gray-700">
+                        {newPo.items.map((it, idx) => {
+                          const isService = it.itemType === 'Services';
+                          const isBeingEdited = editingLineItemId === it.id;
+                          return (
+                            <tr key={it.id || idx} className={`hover:bg-slate-50/50 ${isBeingEdited ? 'bg-amber-50/40 ring-1 ring-amber-200/50 font-semibold' : ''}`}>
+                              <td className="p-2">
+                                <div className="truncate max-w-[150px] font-semibold text-slate-950" title={it.description}>
+                                  {it.description}
+                                </div>
+                                <span className={`inline-block text-[8px] px-1.5 py-[1px] font-black rounded uppercase tracking-wider ${isService ? 'bg-amber-150 text-amber-800 border border-amber-200' : 'bg-blue-150 text-blue-800 border border-blue-200'}`}>
+                                  {isService ? '🛠️ Services' : '📦 Goods'}
+                                </span>
+                              </td>
+                              <td className="p-2 text-center">{it.qty}</td>
+                              <td className="p-2 text-right font-mono text-xs">{formatCurrency(it.unitPrice)}</td>
+                              <td className="p-1 text-center text-[10px]">
+                                {it.taxRate === 12 && <span className="text-indigo-600 font-bold bg-indigo-50 px-1 py-0.5 rounded text-[9px]">12% VAT</span>}
+                                {it.taxRate === 5 && <span className="text-amber-600 font-bold bg-amber-50 px-1 py-0.5 rounded text-[9px]">5% WHT</span>}
+                                {it.taxRate === 2 && <span className="text-amber-700 font-bold bg-amber-50 px-1 py-0.5 rounded text-[9px]">2% WHT</span>}
+                                {it.taxRate === 1 && <span className="text-teal-600 font-bold bg-teal-50 px-1 py-0.5 rounded text-[9px]">1% WHT</span>}
+                                {it.taxRate === 0 && <span className="text-gray-400 bg-gray-50 px-1 py-0.5 rounded text-[9px]">Exempt</span>}
+                              </td>
+                              <td className="p-2 text-right font-mono text-purple-600 text-[10px]">{formatCurrency(it.taxAmount || 0)}</td>
+                              <td className="p-2 text-right font-semibold text-indigo-700 font-mono text-xs">{formatCurrency(it.totalPrice)}</td>
+                              <td className="p-2 text-center whitespace-nowrap space-x-1">
+                                <button 
+                                  type="button" 
+                                  onClick={() => handleEditPoItemSelect(it)} 
+                                  className="text-indigo-600 hover:text-indigo-800 p-0.5 cursor-pointer inline-flex items-center"
+                                  title="Edit/Modify Line Item"
+                                >
+                                  <Edit3 size={12}/>
+                                </button>
+                                <button 
+                                  type="button" 
+                                  onClick={() => handleRemovePoItem(it.id)} 
+                                  className="text-rose-500 hover:text-rose-700 p-0.5 cursor-pointer inline-flex items-center"
+                                  title="Remove Item"
+                                >
+                                  <Trash2 size={12}/>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-4 gap-2">
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-gray-500 flex items-center">
+                    Gross Amt (₱)
+                    {newPo.items && newPo.items.length > 0 && (
+                      <span className="text-[8px] bg-slate-100 text-slate-500 px-1 py-[2px] rounded uppercase font-black tracking-tighter ml-1">Auto</span>
+                    )}
+                  </label>
+                  <input 
+                    required 
+                    type="number" 
+                    step="0.01" 
+                    readOnly={!!(newPo.items && newPo.items.length > 0)}
+                    value={newPo.grossAmount || ''} 
+                    onChange={e => { 
+                      const gross = Number(e.target.value); 
+                      const tax = newPo.taxAmount || 0;
+                      const discount = newPo.discountAmount || 0; 
+                      const net = calculatePoNetAmount(gross, tax, discount, isPoRoundOff); 
+                      setNewPo({...newPo, grossAmount: gross, amount: net}); 
+                    }} 
+                    className={`w-full px-2 py-1.5 border rounded-lg text-xs text-right focus:ring-1 focus:ring-indigo-500 ${newPo.items && newPo.items.length > 0 ? 'bg-slate-50 text-slate-500 border-gray-150 cursor-not-allowed font-semibold' : 'border-gray-200 bg-white'}`} 
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-indigo-500 flex items-center">
+                    Total Tax (₱)
+                    {newPo.items && newPo.items.length > 0 && (
+                      <span className="text-[8px] bg-indigo-100 text-indigo-500 px-1 py-[2px] rounded uppercase font-black tracking-tighter ml-1">Auto</span>
+                    )}
+                  </label>
+                  <input 
+                    type="number" 
+                    step="0.01" 
+                    readOnly={!!(newPo.items && newPo.items.length > 0)}
+                    value={newPo.taxAmount || 0} 
+                    onChange={e => { 
+                      const tax = Number(e.target.value); 
+                      const gross = newPo.grossAmount || 0;
+                      const discount = newPo.discountAmount || 0; 
+                      const net = calculatePoNetAmount(gross, tax, discount, isPoRoundOff); 
+                      setNewPo({...newPo, taxAmount: tax, amount: net}); 
+                    }} 
+                    className={`w-full px-2 py-1.5 border rounded-lg text-xs text-right focus:ring-1 focus:ring-indigo-500 ${newPo.items && newPo.items.length > 0 ? 'bg-indigo-50 text-indigo-500 border-indigo-150 cursor-not-allowed font-semibold' : 'border-gray-200 bg-white'}`} 
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-emerald-600 block">Discount (₱)</label>
+                  <input 
+                    type="number" 
+                    step="0.01" 
+                    value={newPo.discountAmount || ''} 
+                    onChange={e => { 
+                      const discount = Number(e.target.value); 
+                      const gross = newPo.grossAmount || 0; 
+                      const tax = newPo.taxAmount || 0;
+                      const net = calculatePoNetAmount(gross, tax, discount, isPoRoundOff); 
+                      setNewPo({...newPo, discountAmount: discount, amount: net}); 
+                    }} 
+                    className="w-full px-2 py-1.5 border rounded-lg text-xs text-right border-gray-200 focus:ring-1 focus:ring-emerald-500 bg-white font-semibold text-emerald-700" 
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-indigo-650 block">Net Amt (₱)</label>
+                  <input 
+                    disabled 
+                    type="number" 
+                    value={newPo.amount || ''} 
+                    className="w-full px-2 py-1.5 border rounded-lg text-xs text-right bg-indigo-50 text-indigo-800 font-bold border-indigo-200 cursor-not-allowed" 
+                  />
+                </div>
+              </div>
+
+              {/* Automatic Whole Peso Rounding Control Center */}
+              <div className="bg-indigo-50/40 px-3 py-2 rounded-lg border border-indigo-100 flex items-center justify-between text-xs">
+                <label className="flex items-center gap-1.5 font-semibold text-indigo-900 cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={isPoRoundOff} 
+                    onChange={e => setIsPoRoundOff(e.target.checked)} 
+                    className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer w-4 h-4"
+                  />
+                  <span>Enable Automatic Round-Off (Nearest Whole ₱)</span>
+                </label>
+                {isPoRoundOff && (
+                  <span className="text-[10px] font-mono text-indigo-600 bg-white border border-indigo-150 px-2 py-0.5 rounded font-black shadow-sm">
+                    Round Adj: ₱{(newPo.amount - Math.max(0, (newPo.grossAmount || 0) + (newPo.taxAmount || 0) - (newPo.discountAmount || 0))).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

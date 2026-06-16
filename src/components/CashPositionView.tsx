@@ -75,7 +75,6 @@ export default function CashPositionView({
                       <td className="p-4 font-bold text-gray-900">{apv.id}</td>
                       <td className="p-4">
                         <div className="font-medium text-gray-800">{apv.vendor}</div>
-                        <div className="text-[10px] text-gray-400 font-bold uppercase mt-0.5">{apv.businessUnit}</div>
                       </td>
                       <td className="p-4 text-gray-600 font-medium">{apv.fundedDate || apv.settledDate || 'Legacy'}</td>
                       <td className="p-4">
@@ -97,7 +96,14 @@ export default function CashPositionView({
                           <span className="text-[10px] text-gray-400 italic">Pending Check</span>
                         )}
                       </td>
-                      <td className="p-4 text-right font-black text-gray-900">{formatCurrency(apv.amount)}</td>
+                      <td className="p-4 text-right">
+                        <div className="font-black text-gray-900">{formatCurrency(apv.amount)}</div>
+                        {apv.withheldTax && apv.withheldTax > 0 ? (
+                          <div className="text-[9px] font-semibold text-amber-600 leading-tight">
+                            EWT: -{formatCurrency(apv.withheldTax)}
+                          </div>
+                        ) : null}
+                      </td>
                       <td className="p-4 text-center">
                         <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold inline-block border uppercase tracking-wider ${apv.status === 'Paid' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-indigo-50 text-indigo-700 border-indigo-200'}`}>
                           {apv.status === 'Paid' ? 'Paid' : 'Funded'}

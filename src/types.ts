@@ -8,6 +8,17 @@ export interface UserPermissions {
   exportData: boolean;
 }
 
+export interface OrderItem {
+  id: string;
+  description: string;
+  qty: number;
+  unitPrice: number;
+  totalPrice: number;
+  itemType: 'Goods' | 'Services';
+  taxRate: number; // e.g. 12 for 12%, 0 for VAT-Exempt/Zero Rated
+  taxAmount: number; // calculated tax for this line item
+}
+
 export interface PurchaseOrder {
   id: string;
   category: string;
@@ -22,16 +33,18 @@ export interface PurchaseOrder {
   amount: number;
   grossAmount: number;
   discountAmount: number;
+  taxAmount?: number; // total tax calculated for the entire PO
   paymentTerms: string;
   remarks: string;
   attachmentData: string;
   status: string;
+  items?: OrderItem[];
 }
 
 export interface ApvRecord {
   id: string;
   poId: string;
-  businessUnit: 'ETMC' | 'EMI' | 'EHI' | string;
+  businessUnit?: string;
   category: string;
   vendor: string;
   invoiceDate: string;
@@ -46,6 +59,8 @@ export interface ApvRecord {
   checkDate: string;
   releaseDate: string | null;
   checkStatus: string;
+  withheldTax?: number;
+  originalAmount?: number;
 }
 
 export interface AppUser {

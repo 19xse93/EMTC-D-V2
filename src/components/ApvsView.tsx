@@ -90,12 +90,13 @@ export default function ApvsView({
                       <div className="font-medium">{apv.vendor}</div>
                       <div className="flex items-center gap-1.5 mt-0.5 mb-1.5">
                         <span className="text-[10px] text-indigo-500">{apv.poId}</span>
-                        <span className="text-gray-300">|</span>
-                        <span className="text-[10px] text-gray-400 uppercase font-black">{apv.businessUnit}</span>
                         {apv.category && apv.category !== 'General' && (
-                          <span className="text-[9px] px-1.5 py-[1px] rounded bg-purple-50 text-purple-600 border border-purple-200 uppercase font-bold tracking-tighter">
-                            {apv.category}
-                          </span>
+                          <>
+                            <span className="text-gray-300">|</span>
+                            <span className="text-[9px] px-1.5 py-[1px] rounded bg-purple-50 text-purple-600 border border-purple-200 uppercase font-bold tracking-tighter">
+                              {apv.category}
+                            </span>
+                          </>
                         )}
                       </div>
                       {needsCheck && (
@@ -109,7 +110,17 @@ export default function ApvsView({
                         </span>
                       )}
                     </td>
-                    <td className="p-4 text-right font-bold">{formatCurrency(apv.amount)}</td>
+                    <td className="p-4 text-right">
+                      <div className="font-bold text-gray-900">{formatCurrency(apv.amount)}</div>
+                      {apv.withheldTax && apv.withheldTax > 0 ? (
+                        <div className="text-[9px] font-semibold text-amber-600 leading-tight mt-0.5">
+                          EWT: -{formatCurrency(apv.withheldTax)}
+                          {apv.originalAmount && apv.originalAmount !== apv.amount && (
+                            <span className="text-gray-400 block font-normal text-[8px]">Gross: {formatCurrency(apv.originalAmount)}</span>
+                          )}
+                        </div>
+                      ) : null}
+                    </td>
                     <td className="p-4 text-center">
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${getAgingColor(aging)}`}>
                         {aging}
